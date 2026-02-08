@@ -1,0 +1,125 @@
+`timescale 1ns/1ps
+
+module hybrid_search64 #(
+  parameter int WIDTH = 32
+)(
+  input  logic                    clk,
+  input  logic                    rst,        // synchronous active-high reset
+  input  logic                    start,      // pulse to start search
+  input  logic [WIDTH-1:0]        key,
+  input  logic [64*WIDTH-1:0]     sorted_bus, // element i at sorted_bus[i*WIDTH +: WIDTH]
+  output logic                    valid,
+  output logic                    found,
+  output logic [5:0]              index
+);
+
+  // Internal pipeline registers
+  logic [WIDTH-1:0]    key_reg;
+  logic [64*WIDTH-1:0] sorted_reg;
+  logic [1:0]          block_sel_reg;
+
+  // ---------------------------------------------------------
+  // Stage 1: Capture inputs & Select Block (Cycle 1)
+  // ---------------------------------------------------------
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      key_reg       <= '0;
+      sorted_reg    <= '0;
+      block_sel_reg <= 2'd0;
+    end else if (start) begin
+      key_reg    <= key;
+      sorted_reg <= sorted_bus;
+      
+      // Block selection logic (Pre-calculation)
+      // Indices: 15, 31, 47, 63
+      if (key <= sorted_bus[15*WIDTH +: WIDTH])      block_sel_reg <= 2'd0;
+      else if (key <= sorted_bus[31*WIDTH +: WIDTH]) block_sel_reg <= 2'd1;
+      else if (key <= sorted_bus[47*WIDTH +: WIDTH]) block_sel_reg <= 2'd2;
+      else                                           block_sel_reg <= 2'd3;
+    end
+  end
+
+  // ---------------------------------------------------------
+  // Stage 2: Parallel Compare & Encode (Combinational Logic)
+  // ---------------------------------------------------------
+  // NOTE: Renamed 'matches' to 'match_vec' because 'matches' is a keyword
+  logic [15:0]      match_vec;     
+  logic [3:0]       match_idx16;   
+  logic             any_match;
+  logic [WIDTH-1:0] blk [0:15];
+
+  // 2a. Slicing the correct block
+  genvar gi;
+  generate
+    for (gi = 0; gi < 16; gi++) begin : READ_BLK
+      logic [WIDTH-1:0] e0, e1, e2, e3;
+      // Calculate offsets based on block width (16)
+      assign e0 = sorted_reg[(0  + gi)*WIDTH +: WIDTH];
+      assign e1 = sorted_reg[(16 + gi)*WIDTH +: WIDTH];
+      assign e2 = sorted_reg[(32 + gi)*WIDTH +: WIDTH];
+      assign e3 = sorted_reg[(48 + gi)*WIDTH +: WIDTH];
+
+      always_comb begin
+        case (block_sel_reg)
+          2'd0: blk[gi] = e0;
+          2'd1: blk[gi] = e1;
+          2'd2: blk[gi] = e2;
+          2'd3: blk[gi] = e3;
+          default: blk[gi] = e0;
+        endcase
+      end
+    end
+  endgenerate
+
+  // 2b. Parallel Comparators
+  generate
+    for (gi = 0; gi < 16; gi++) begin : CMPS
+      assign match_vec[gi] = (blk[gi] == key_reg);
+    end
+  endgenerate
+
+  // 2c. Priority Encoder
+  always_comb begin
+    any_match   = 1'b0;
+    match_idx16 = 4'd0;
+    for (int ii = 0; ii < 16; ii++) begin
+      if (match_vec[ii]) begin
+        any_match   = 1'b1;
+        match_idx16 = ii[3:0];
+        break; // VALID SYNTAX: Use 'break' for loops (not 'disable')
+      end
+    end
+  end
+
+  // ---------------------------------------------------------
+  // Valid Signal Pipeline (Control Path)
+  // ---------------------------------------------------------
+  // Latency alignment: Start (T0) -> Capture (T1) -> Output (T2)
+  logic start_pending;
+
+  always_ff @(posedge clk) begin
+    if (rst) start_pending <= 1'b0;
+    else     start_pending <= start; // 1 cycle delay to match Stage 1 capture
+  end
+
+  // ---------------------------------------------------------
+  // Output Register Update (Cycle 2)
+  // ---------------------------------------------------------
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      valid <= 1'b0;
+      found <= 1'b0;
+      index <= 6'd0;
+    end else begin
+      valid <= start_pending; 
+
+      if (start_pending) begin
+        found <= any_match;
+        // Calculation: BlockOffset + LocalIndex
+        // Explicit width casting to prevent synthesis warnings
+        index <= { {2{1'b0}}, block_sel_reg } * 6'd16 + {2'b00, match_idx16};
+      end
+    end
+  end
+
+endmodule

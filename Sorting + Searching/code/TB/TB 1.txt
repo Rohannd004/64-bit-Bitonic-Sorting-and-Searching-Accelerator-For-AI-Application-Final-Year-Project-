@@ -1,0 +1,145 @@
+`timescale 1ns/1ps
+
+module tb_hybrid_search64;
+  localparam int WIDTH = 32;
+
+  // clock & reset
+  logic clk;
+  logic rst;
+  
+  initial begin
+    clk = 0;
+    forever #5 clk = ~clk; // 100 MHz clock
+  end
+
+  // Signals for Sorter
+  logic [64*WIDTH-1:0] in_bus;
+  logic [64*WIDTH-1:0] sorted_out;
+  logic direction; 
+
+  // Instantiate YOUR sort64_top (pure combinational/async)
+  sort64_top #(.WIDTH(WIDTH)) sorter (
+    .direction(direction),
+    .in_bus(in_bus),
+    .out_bus(sorted_out)
+  );
+
+  // Signals for Searcher
+  logic start;
+  logic [WIDTH-1:0] key;
+  logic valid;
+  logic found;
+  logic [5:0] index;
+
+  // Instantiate Hybrid Search
+  hybrid_search64 #(.WIDTH(WIDTH)) searcher (
+    .clk(clk), 
+    .rst(rst),
+    .start(start), 
+    .key(key),
+    .sorted_bus(sorted_out),
+    .valid(valid), 
+    .found(found), 
+    .index(index)
+  );
+
+  // Arrays for verification
+  int seq[0:63];
+  int golden[0:63];
+  
+  // FIX: Declarations moved here (before the initial block code starts)
+  int test_keys[0:9];
+  int sw_idx; 
+
+  // Helper: Software linear search
+  function int sw_find_first(input int arr[0:63], input int key_in);
+    for (int i = 0; i < 64; i++) begin
+      if (arr[i] == key_in) return i;
+    end
+    return -1;
+  endfunction
+
+  initial begin
+    // Init
+    rst = 1;
+    start = 0;
+    direction = 1'b0; // ascending
+    in_bus = '0;
+    
+    #20;
+    rst = 0;
+
+    // 1. Generate Deterministic Input
+    for (int i = 0; i < 64; i++) begin
+      seq[i] = (i * 7 + 13) % 997; 
+      in_bus[i*WIDTH +: WIDTH] = seq[i];
+    end
+
+    // Wait for sorter (combinational delay)
+    #50;
+
+    // 2. Build Golden Reference (Software Sort)
+    for (int i = 0; i < 64; i++) golden[i] = seq[i];
+    
+    // Bubble sort for golden ref
+    for (int a = 0; a < 64; a++) begin
+      for (int b = a+1; b < 64; b++) begin
+        if (golden[a] > golden[b]) begin
+          int t = golden[a]; 
+          golden[a] = golden[b]; 
+          golden[b] = t;
+        end
+      end
+    end
+
+    $display("Sorted array (Reference):");
+    for (int i = 0; i < 64; i++) $write("%0d ", golden[i]);
+    $display("\n");
+
+    // 3. Define Test Keys
+    // (Assignments only here, declaration is now above)
+    test_keys[0] = 4;   
+    test_keys[1] = golden[15];  
+    test_keys[2] = golden[16];  
+    test_keys[3] = golden[31];  
+    test_keys[4] = golden[32];  
+    test_keys[5] = golden[48];  
+    test_keys[6] = golden[63];  
+    test_keys[7] = -12345;      
+    test_keys[8] = golden[20];  
+    test_keys[9] = golden[47];  
+
+    // 4. Run Tests
+    for (int ti = 0; ti < 10; ti++) begin
+      key = test_keys[ti];
+      
+      @(posedge clk);
+      start = 1;
+      @(posedge clk);
+      start = 0;
+      
+      wait (valid == 1);
+      
+      // Verify
+      sw_idx = sw_find_first(golden, key); // Assignment only
+      
+      if (found) begin
+        if (sw_idx == index) 
+          $display("Test %0d: key=%0d FOUND at index=%0d - PASS", ti, key, index);
+        else 
+          $display("Test %0d: key=%0d FOUND at index=%0d but SW=%0d - FAIL", ti, key, index, sw_idx);
+      end else begin
+        if (sw_idx == -1) 
+          $display("Test %0d: key=%0d NOT FOUND - PASS", ti, key);
+        else  
+          $display("Test %0d: key=%0d NOT FOUND but SW says idx=%0d - FAIL", ti, key, sw_idx);
+      end
+      
+      repeat (2) @(posedge clk);
+    end
+
+    $display("\nHybrid search test completed.");
+    $finish;
+  end
+
+endmodule

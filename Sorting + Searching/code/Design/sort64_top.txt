@@ -1,0 +1,78 @@
+`timescale 1ns/1ps
+//======================================================================
+// sort64_top.sv
+// Top-level 64-element bitonic sorting accelerator:
+// 4 x bitonic_sort16 -> 2 x bitonic_merge32 -> 1 x bitonic_merge64 (direction)
+// Assumes modules:
+//   bitonic_sort16 #(N=16, WIDTH) (in_bus, out_bus)
+//   bitonic_merge32 #(WIDTH) (in_bus[32*W-1:0], out_bus[32*W-1:0])
+//   bitonic_merge64 #(WIDTH) (direction, in_bus[64*W-1:0], out_bus[64*W-1:0])
+//======================================================================
+
+module sort64_top #(
+  parameter int WIDTH = 32
+)(
+  input  logic                    direction, // 0=ascending, 1=descending
+  input  logic [64*WIDTH-1:0]     in_bus,    // 64 elements packed (element0 at LSB chunk)
+  output logic [64*WIDTH-1:0]     out_bus    // final sorted 64 elems
+);
+
+  // ---- split input into 4 blocks of 16 ----
+  logic [16*WIDTH-1:0] A0, A1, A2, A3;
+  genvar gi;
+  generate
+    for (gi = 0; gi < 16; gi = gi + 1) begin : SPLIT_IN
+      assign A0[gi*WIDTH +: WIDTH] = in_bus[(gi          )*WIDTH +: WIDTH]; // 0..15
+      assign A1[gi*WIDTH +: WIDTH] = in_bus[(gi + 16     )*WIDTH +: WIDTH]; // 16..31
+      assign A2[gi*WIDTH +: WIDTH] = in_bus[(gi + 32     )*WIDTH +: WIDTH]; // 32..47
+      assign A3[gi*WIDTH +: WIDTH] = in_bus[(gi + 48     )*WIDTH +: WIDTH]; // 48..63
+    end
+  endgenerate
+
+  // ---- sort each 16-block (ascending) ----
+  logic [16*WIDTH-1:0] S0, S1, S2, S3;
+  bitonic_sort16 #(.N(16), .WIDTH(WIDTH)) sort0 ( .in_bus(A0), .out_bus(S0) );
+  bitonic_sort16 #(.N(16), .WIDTH(WIDTH)) sort1 ( .in_bus(A1), .out_bus(S1) );
+  bitonic_sort16 #(.N(16), .WIDTH(WIDTH)) sort2 ( .in_bus(A2), .out_bus(S2) );
+  bitonic_sort16 #(.N(16), .WIDTH(WIDTH)) sort3 ( .in_bus(A3), .out_bus(S3) );
+
+  // ---- prepare bitonic inputs for merge32: M0_in = { S0, reverse(S1) } ----
+  logic [32*WIDTH-1:0] M0_in;
+  generate
+    for (gi = 0; gi < 16; gi = gi + 1) begin : PACK_M0
+      assign M0_in[gi*WIDTH +: WIDTH]        = S0[gi*WIDTH +: WIDTH];
+      assign M0_in[(gi+16)*WIDTH +: WIDTH]   = S1[(15-gi)*WIDTH +: WIDTH]; // reversed
+    end
+  endgenerate
+
+  // ---- prepare bitonic inputs for merge32: M1_in = { S2, reverse(S3) } ----
+  logic [32*WIDTH-1:0] M1_in;
+  generate
+    for (gi = 0; gi < 16; gi = gi + 1) begin : PACK_M1
+      assign M1_in[gi*WIDTH +: WIDTH]        = S2[gi*WIDTH +: WIDTH];
+      assign M1_in[(gi+16)*WIDTH +: WIDTH]   = S3[(15-gi)*WIDTH +: WIDTH]; // reversed
+    end
+  endgenerate
+
+  // ---- merge32 each half into ascending 32-element blocks ----
+  logic [32*WIDTH-1:0] M0_out, M1_out;
+  bitonic_merge32 #(.WIDTH(WIDTH)) merge32_0 ( .in_bus(M0_in), .out_bus(M0_out) );
+  bitonic_merge32 #(.WIDTH(WIDTH)) merge32_1 ( .in_bus(M1_in), .out_bus(M1_out) );
+
+  // ---- prepare bitonic input for merge64: BM64_in = { M0_out, reverse(M1_out) } ----
+  logic [64*WIDTH-1:0] BM64_in;
+  generate
+    for (gi = 0; gi < 32; gi = gi + 1) begin : PACK_M64
+      assign BM64_in[gi*WIDTH +: WIDTH]        = M0_out[gi*WIDTH +: WIDTH];
+      assign BM64_in[(gi+32)*WIDTH +: WIDTH]   = M1_out[(31-gi)*WIDTH +: WIDTH]; // reversed
+    end
+  endgenerate
+
+  // ---- final merge64 (applies direction) ----
+  bitonic_merge64 #(.WIDTH(WIDTH)) merge64_0 (
+    .direction(direction),
+    .in_bus(BM64_in),
+    .out_bus(out_bus)
+  );
+
+endmodule
